@@ -1,0 +1,237 @@
+# germs
+
+A DVD‑screensaver‑style bouncing logo that multiplies, ages, and dies —
+implemented as a cellular automaton with an on‑screen control panel.
+
+| file | what it is |
+|---|---|
+| `index.html` + `sketch.js` | the sketch and its logic |
+| `README.md` | this document — a copy is embedded in `index.html`, so keep the two in sync; the panel's **Readme** button shows the embedded copy |
+| `assets/germs.png` | the source logo (a blue ring); the sketch redraws it in code |
+
+Just open `index.html` in a browser — no server needed.
+
+---
+
+## The control panel
+
+All values are live — drag a slider and the simulation changes immediately.
+
+
+### Cooldown
+
+`CFG.tSeconds` · default **15 s**
+
+Minimum time a germ must wait between splits (and before its first split).
+
+It **halves every generation**: gen 1 = 15 s, gen 2 = 7.5 s, gen 3 = 3.75 s.
+
+A germ splits only when its cooldown has elapsed *and* it hits a wall; the
+cooldown then resets.
+
+
+### Warm‑up
+
+`CFG.warmupSeconds` · default **10 s** · range 0 s – 6 min, 5 s steps
+
+One‑time quiet period after every restart (the initial seed *or* a cull).
+
+During warm‑up the lone ring just bounces — nobody splits.
+
+It is **added on top of** the cooldown, so the first split after a restart
+happens at roughly `warm‑up + cooldown`.
+
+
+### Max splits
+
+`CFG.maxSplits` · default **3**
+
+How many children a germ produces before it dies. It is removed the instant it
+creates its last child.
+
+`1` → each germ merely replaces itself (population stays sparse).
+
+`2` or more → the population grows.
+
+
+### Cull at
+
+`CFG.cullAt` · default **90**
+
+Population threshold that triggers a reset.
+
+When it is reached, **every germ dies except the single most recently born
+one**, which resets to generation 1 and re‑populates from wherever it happens
+to be.
+
+
+### Child speed‑up
+
+`CFG.childSpeedup` · default **15 %**
+
+How much faster each generation moves than its parent.
+
+Gen 1 = base speed, gen 2 = +15 %, gen 3 = +30 %. Capped by *Max generation*.
+
+
+### Max generation
+
+`CFG.gmax` · default **3**
+
+Deepest generation number.
+
+Beyond it, children keep the parent's generation, so cooldown and speed stop
+changing. This keeps the state set finite (a CA requirement).
+
+
+### Motion pace
+
+`CFG.tickEvery` · default **4**
+
+Render frames per simulation tick. **Higher = slower** on‑screen motion.
+
+It does **not** affect any of the second‑based timings above — those are
+converted to ticks using this value.
+
+
+### Ring radius
+
+`CFG.ringRadius` · default **150 px**
+
+Outer radius of the drawn ring.
+
+The bounce boundary is inset by this amount, so the **edge of the ring**
+touches the wall, not its centre.
+
+
+### Cell size
+
+`CFG.cellSize` · default **6 px**
+
+Lattice resolution — pixels per grid cell.
+
+Smaller = a finer grid: smoother paths, more cells, slower.
+
+Changing it **rebuilds the whole grid** and restarts from one germ.
+
+
+### Buttons
+
+- **Pause / Resume** — freezes the simulation and rendering.
+- **Restart** — clears the field and seeds a single fresh germ.
+- **Reset to defaults** — restores every slider and value to the numbers baked
+  into `sketch.js` at load time.
+- **Readme** — opens this document in an overlay.
+- **hide / show** — collapses the panel.
+
+---
+
+## What a germ carries
+
+Every germ ("token") holds a small bundle of state:
+
+- **generation** `g` — 1 for a seed, `g+1` for a child (capped at *Max generation*)
+- **cooldown** — ticks remaining until it may split again
+- **child count** — how many children it has made so far
+- **birth tick** — used by the cull to find "the latest one"
+- **direction** — one of 8 fixed headings
+- **movement budget** — a fractional accumulator that lets faster generations
+  cover more ground per tick
+
+## Life of a germ
+
+1. **Seed / warm‑up** — the field starts with one germ. For `warmupSeconds`
+   nothing splits.
+2. **Drift & bounce** — it travels in a straight diagonal line and reflects off
+   the four walls at its ring edge.
+3. **Split** — once its cooldown expires, the next wall bounce spawns one child.
+   The child launches at an angle rotated ~30–60° from the parent, one
+   generation deeper, slightly faster, with a fresh (shorter) cooldown. The
+   cooldown resets and the process repeats.
+4. **Death** — after `maxSplits` children the germ vanishes.
+5. **Cull** — when the whole population reaches `cullAt`, everyone dies except
+   the most recently born germ, which becomes a new generation‑1 seed. Warm‑up
+   restarts. The cycle begins again and never repeats exactly.
+
+---
+
+## What makes `sketch.js` a cellular automaton
+
+A cellular automaton is: a fixed grid of cells, each holding one of a finite set
+of states, all updated **simultaneously** by a **single rule** that looks only at
+a cell and its immediate neighbours. `sketch.js` is built to those constraints.
+
+### Lattice
+
+The canvas is divided into a fixed **180 × 320 grid** of 6‑pixel cells
+(`GW`, `GH`, `CS`). Nothing lives "between" cells — a germ is always *at* a cell.
+
+### Finite cell state
+
+Motion is modelled as a **lattice gas** (the HPP/FHP trick). Each cell has **8
+direction slots**, one per allowed heading. The 8 headings are the vectors
+`(±1, ±2)` and `(±2, ±1)` — all the same length (`√5`), none axis‑aligned, which
+is why a germ can never drift purely horizontally or vertically. A slot is
+either empty or holds one germ, and every field a germ carries is a bounded
+integer. That makes the per‑cell state a finite set — the defining property of a
+CA.
+
+### One synchronous rule, applied everywhere
+
+Each tick rebuilds the entire grid from the previous one (double‑buffered), so
+every cell updates from the *same* prior snapshot — no cell sees another's
+half‑updated state. The rule is four local sub‑steps:
+
+1. **Stream** — a germ in slot *d* moves along vector *d* to the same slot of the
+   destination cell. Faster generations spend a larger movement budget and take
+   more hops.
+2. **Bounce** — a hop that would leave the playable area is reflected: the
+   offending velocity component flips and the germ lands in the matching slot.
+   Because the 8‑vector set is closed under those flips, the result is always a
+   legal heading.
+3. **Split** — `cooldown--`; if a germ bounced this tick with an expired
+   cooldown and there is a free neighbouring slot, a child is written into it.
+   Which slot (the split angle) comes from a **fixed hash of `(x, y, tick)`** —
+   see below.
+4. **Die‑off** — a germ that has hit `maxSplits` is cleared.
+
+### Determinism instead of `Math.random()`
+
+A true CA rule is a pure function, so the "random" split angle isn't random: it
+is a hash of the germ's cell coordinates and the current tick. Same starting
+state → same run, every time. The variety you see is the hash acting like a
+frozen field of spatial noise.
+
+### Where it deliberately bends CA purity
+
+Two mechanisms are **global**, not local, and are the honest exceptions:
+
+- **Cull at N** — reacting to the *total* population and keeping the single
+  newest germ requires scanning the whole grid. A stricter CA would replace this
+  with a locally‑spreading "burnout wave" (an earlier version did exactly that —
+  a Greenberg–Hastings excitable medium — but a hard cull reads more cleanly).
+- **Warm‑up** — gated on a single global clock (`tick − restartTick`) shared by
+  every cell.
+
+Everything else — movement, bouncing, splitting, individual death — is purely
+local and synchronous.
+
+### Rendering is not part of the CA
+
+The simulation is integer cells; the smooth on‑screen motion is a rendering
+layer on top. Each germ is drawn at its constant nominal speed for its
+generation, with the leftover movement budget placing it between grid cells, so
+the ring glides even though the underlying token hops in discrete steps.
+
+---
+
+## Constants not exposed in the panel (`sketch.js`)
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `GW`, `GH` | 180, 320 | grid dimensions, derived from the canvas size and `cellSize` |
+| `ND` | 8 | direction slots per cell (changing it would break the velocity set) |
+| `VX`, `VY` | `(±1,±2)`, `(±2,±1)` | the 8 velocity vectors |
+| `SPEED_SCALE` | 1000 | fixed‑point unit; 1000 budget = one vector hop |
+| `COLOR` | `#29A2DC` | ring stroke colour |
+| `DEFAULTS` | — | snapshot of `CFG` at load, used by *Reset to defaults* |
