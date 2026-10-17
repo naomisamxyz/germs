@@ -128,6 +128,13 @@ let tickAccumulatorMs = 0;
 let restartTick = 0; // tick of the last seed / cull; warm-up counts from here
 let paused = false;
 
+// Indices (into occ/gen/.../acc) of every currently-live token. tick() and
+// render() both iterate this instead of the full S-slot grid — population
+// is typically a few hundred at most out of ~460,000 slots at the default
+// resolution, so scanning only the live ones instead of every slot (most of
+// them empty) is what keeps this fast on slower devices, mobile included.
+let activeList = [];
+
 function seed(t) {
   restartTick = t;
   const h = hash(7, 11, t);
@@ -141,6 +148,7 @@ function seed(t) {
   spl[si] = 0;
   born[si] = t;
   acc[si] = 0;
+  activeList = [si]; // seed() is only ever called on an otherwise-empty grid
 }
 
 function hardRestart() {
@@ -165,116 +173,137 @@ function tick(t) {
   const loX = MARGIN_X, hiX = GW - 1 - MARGIN_X;
   const loY = MARGIN_Y, hiY = GH - 1 - MARGIN_Y;
 
+  // Slots written to nocc this tick (streamed-into targets, then split
+  // children appended below) — the sparse replacement for scanning every
+  // slot in the grid.
+  const nActive = [];
+
   // --- 1 & 2: stream + bounce ---
-  for (let y = 0; y < GH; y++) {
-    for (let x = 0; x < GW; x++) {
-      const base = (y * GW + x) * ND;
-      for (let d = 0; d < ND; d++) {
-        const si = base + d;
-        if (!occ[si]) continue;
+  for (let k = 0; k < activeList.length; k++) {
+    const si = activeList[k];
+    const d = si % ND;
+    const cellIdx = (si - d) / ND;
+    const x = cellIdx % GW;
+    const y = (cellIdx / GW) | 0;
 
-        // Spend the movement budget as whole velocity-vector hops, keeping
-        // the remainder for next tick. Faster generations make more hops.
-        let a = acc[si] + speedFor(gen[si]);
-        let cx = x, cy = y, cdir = d, hitAny = false;
-        while (a >= SPEED_SCALE) {
-          a -= SPEED_SCALE;
-          let nx = cx + VX[cdir], ny = cy + VY[cdir];
-          let vx = VX[cdir], vy = VY[cdir];
-          if (nx < loX) { nx = 2 * loX - nx; vx = -vx; }
-          else if (nx > hiX) { nx = 2 * hiX - nx; vx = -vx; }
-          if (ny < loY) { ny = 2 * loY - ny; vy = -vy; }
-          else if (ny > hiY) { ny = 2 * hiY - ny; vy = -vy; }
-          if (vx !== VX[cdir] || vy !== VY[cdir]) {
-            hitAny = true;
-            const nd = VKEY[(vx + 2) * 5 + (vy + 2)];
-            cdir = nd < 0 ? (cdir + ND / 2) % ND : nd;
-          }
-          cx = nx; cy = ny;
-        }
-        // safety clamp (e.g. right after the ring radius / cell size changed)
-        if (cx < loX) cx = loX; else if (cx > hiX) cx = hiX;
-        if (cy < loY) cy = loY; else if (cy > hiY) cy = hiY;
+    // Spend the movement budget as whole velocity-vector hops, keeping
+    // the remainder for next tick. Faster generations make more hops.
+    let a = acc[si] + speedFor(gen[si]);
+    let cx = x, cy = y, cdir = d, hitAny = false;
+    while (a >= SPEED_SCALE) {
+      a -= SPEED_SCALE;
+      let nx = cx + VX[cdir], ny = cy + VY[cdir];
+      let vx = VX[cdir], vy = VY[cdir];
+      if (nx < loX) { nx = 2 * loX - nx; vx = -vx; }
+      else if (nx > hiX) { nx = 2 * hiX - nx; vx = -vx; }
+      if (ny < loY) { ny = 2 * loY - ny; vy = -vy; }
+      else if (ny > hiY) { ny = 2 * hiY - ny; vy = -vy; }
+      if (vx !== VX[cdir] || vy !== VY[cdir]) {
+        hitAny = true;
+        const nd = VKEY[(vx + 2) * 5 + (vy + 2)];
+        cdir = nd < 0 ? (cdir + ND / 2) % ND : nd;
+      }
+      cx = nx; cy = ny;
+    }
+    // safety clamp (e.g. right after the ring radius / cell size changed)
+    if (cx < loX) cx = loX; else if (cx > hiX) cx = hiX;
+    if (cy < loY) cy = loY; else if (cy > hiY) cy = hiY;
 
-        const ti = (cy * GW + cx) * ND + cdir;
-        if (!nocc[ti]) {
-          nocc[ti] = 1;
-          ngen[ti] = gen[si];
-          ncd[ti] = cd[si];
-          nspl[ti] = spl[si];
-          nborn[ti] = born[si];
-          nacc[ti] = a;
-          if (hitAny) {
-            bounced[ti] = 1;
-            // (x, y, d, acc[si]) is exactly the state this token had at the
-            // end of the previous tick — the true anchor render() needs for
-            // the pre-bounce leg.
-            srcCX[ti] = x;
-            srcCY[ti] = y;
-            srcDIR[ti] = d;
-            srcACC[ti] = acc[si];
-          }
-        }
-        // target slot already taken -> tokens merge (rare)
+    const ti = (cy * GW + cx) * ND + cdir;
+    if (!nocc[ti]) {
+      nocc[ti] = 1;
+      ngen[ti] = gen[si];
+      ncd[ti] = cd[si];
+      nspl[ti] = spl[si];
+      nborn[ti] = born[si];
+      nacc[ti] = a;
+      nActive.push(ti);
+      if (hitAny) {
+        bounced[ti] = 1;
+        // (x, y, d, acc[si]) is exactly the state this token had at the
+        // end of the previous tick — the true anchor render() needs for
+        // the pre-bounce leg.
+        srcCX[ti] = x;
+        srcCY[ti] = y;
+        srcDIR[ti] = d;
+        srcACC[ti] = acc[si];
       }
     }
+    // target slot already taken -> tokens merge (rare)
   }
 
   // --- 3 & 4: split, then death ---
   const warming = t - restartTick < WARMUP_TICKS;
-  let population = 0;
-  for (let y = 0; y < GH; y++) {
-    for (let x = 0; x < GW; x++) {
-      const base = (y * GW + x) * ND;
-      for (let d = 0; d < ND; d++) {
-        const si = base + d;
-        if (!nocc[si]) continue;
+  // nActive grows as children are pushed below; a plain for loop re-reads
+  // .length each iteration, so newly-added children get visited too (they
+  // never immediately re-split, since bounced[] isn't set for them).
+  for (let k = 0; k < nActive.length; k++) {
+    const si = nActive[k];
+    if (!warming) {
+      const d = si % ND;
+      const cellIdx = (si - d) / ND;
+      const x = cellIdx % GW;
+      const y = (cellIdx / GW) | 0;
+      const base = cellIdx * ND;
 
-        if (!warming) {
-          const g = ngen[si];
-          let c = ncd[si] - 1;
-          if (bounced[si] && c <= 0) {
-            c = cooldownFor(g);
-            const h = hash(x, y, t);
-            const sign = h & 1 ? 1 : -1;
-            const mag = 1 + ((h >>> 1) & 1); // 1 or 2 slots
-            const cslot = base + ((d + sign * mag + ND) % ND);
-            if (!nocc[cslot]) {
-              const cg = Math.min(g + 1, CFG.gmax);
-              nocc[cslot] = 1;
-              ngen[cslot] = cg;
-              ncd[cslot] = cooldownFor(cg);
-              nspl[cslot] = 0;
-              nborn[cslot] = t;
-              nacc[cslot] = 0;
+      const g = ngen[si];
+      let c = ncd[si] - 1;
+      if (bounced[si] && c <= 0) {
+        c = cooldownFor(g);
+        const h = hash(x, y, t);
+        const sign = h & 1 ? 1 : -1;
+        const mag = 1 + ((h >>> 1) & 1); // 1 or 2 slots
+        const cslot = base + ((d + sign * mag + ND) % ND);
+        if (!nocc[cslot]) {
+          const cg = Math.min(g + 1, CFG.gmax);
+          nocc[cslot] = 1;
+          ngen[cslot] = cg;
+          ncd[cslot] = cooldownFor(cg);
+          nspl[cslot] = 0;
+          nborn[cslot] = t;
+          nacc[cslot] = 0;
+          nActive.push(cslot);
 
-              if (++nspl[si] >= CFG.maxSplits) {
-                nocc[si] = 0; // died producing its last child
-                continue;
-              }
-            }
+          if (++nspl[si] >= CFG.maxSplits) {
+            nocc[si] = 0; // died producing its last child
+            continue;
           }
-          ncd[si] = c;
         }
-        population++;
       }
+      ncd[si] = c;
     }
+  }
+
+  // Final live set for this tick (nActive may still list a slot that died
+  // producing its last child above).
+  let population = 0;
+  const finalActive = [];
+  for (let k = 0; k < nActive.length; k++) {
+    const idx = nActive[k];
+    if (nocc[idx]) { finalActive.push(idx); population++; }
   }
 
   // Global cull: past cullAt, everything dies except the most recently born
   // token, which resets to a fresh progenitor and re-populates in place.
   if (population >= CFG.cullAt) {
     let bestBorn = -1, bestIdx = -1;
-    for (let i = 0; i < S; i++) {
-      if (nocc[i] && nborn[i] > bestBorn) { bestBorn = nborn[i]; bestIdx = i; }
+    for (let k = 0; k < finalActive.length; k++) {
+      const idx = finalActive[k];
+      if (nborn[idx] > bestBorn) { bestBorn = nborn[idx]; bestIdx = idx; }
     }
     if (bestIdx >= 0) {
-      for (let i = 0; i < S; i++) if (i !== bestIdx) nocc[i] = 0;
+      for (let k = 0; k < finalActive.length; k++) {
+        const idx = finalActive[k];
+        if (idx !== bestIdx) nocc[idx] = 0;
+      }
       ngen[bestIdx] = 1;
       ncd[bestIdx] = cooldownFor(1);
       nspl[bestIdx] = 0;
       nborn[bestIdx] = t;
       restartTick = t; // warm-up restarts too
+      finalActive.length = 0;
+      finalActive.push(bestIdx);
+      population = 1;
     }
   }
 
@@ -285,6 +314,7 @@ function tick(t) {
   [born, nborn] = [nborn, born];
   [acc, nacc] = [nacc, acc];
 
+  activeList = finalActive;
   if (population === 0) seed(t + 1);
 }
 
@@ -335,45 +365,43 @@ function render(alpha) {
   // exactly at the wall — leg 1 at the pre-bounce heading, leg 2 at the
   // post-bounce heading — so frame-to-frame position never snaps, but the
   // corner at the wall stays sharp instead of getting rounded off.
-  for (let ci = 0; ci < N; ci++) {
-    const base = ci * ND;
-    const cx = ci % GW;
-    const cy = (ci / GW) | 0;
-    for (let d = 0; d < ND; d++) {
-      const si = base + d;
-      if (!occ[si]) continue;
+  for (let k = 0; k < activeList.length; k++) {
+    const si = activeList[k];
+    const d = si % ND;
+    const cellIdx = (si - d) / ND;
+    const cx = cellIdx % GW;
+    const cy = (cellIdx / GW) | 0;
 
-      const nomV = speedFor(gen[si]) / SPEED_SCALE; // vectors advanced per tick
-      const pEnd = anchorPx(cx, cy, acc[si], d);
-      let px, py;
+    const nomV = speedFor(gen[si]) / SPEED_SCALE; // vectors advanced per tick
+    const pEnd = anchorPx(cx, cy, acc[si], d);
+    let px, py;
 
-      if (!bounced[si]) {
-        const p0x = pEnd[0] - nomV * CS * VX[d];
-        const p0y = pEnd[1] - nomV * CS * VY[d];
-        px = p0x + (pEnd[0] - p0x) * alpha;
-        py = p0y + (pEnd[1] - p0y) * alpha;
+    if (!bounced[si]) {
+      const p0x = pEnd[0] - nomV * CS * VX[d];
+      const p0y = pEnd[1] - nomV * CS * VY[d];
+      px = p0x + (pEnd[0] - p0x) * alpha;
+      py = p0y + (pEnd[1] - p0y) * alpha;
+    } else {
+      const sd = srcDIR[si];
+      const [p0x, p0y] = anchorPx(srcCX[si], srcCY[si], srcACC[si], sd);
+      const naiveX = p0x + nomV * CS * VX[sd];
+      const naiveY = p0y + nomV * CS * VY[sd];
+      const f = kinkFraction(p0x, p0y, naiveX - p0x, naiveY - p0y);
+      const kx = p0x + (naiveX - p0x) * f;
+      const ky = p0y + (naiveY - p0y) * f;
+      if (alpha < f) {
+        px = p0x + (kx - p0x) * (alpha / f);
+        py = p0y + (ky - p0y) * (alpha / f);
       } else {
-        const sd = srcDIR[si];
-        const [p0x, p0y] = anchorPx(srcCX[si], srcCY[si], srcACC[si], sd);
-        const naiveX = p0x + nomV * CS * VX[sd];
-        const naiveY = p0y + nomV * CS * VY[sd];
-        const f = kinkFraction(p0x, p0y, naiveX - p0x, naiveY - p0y);
-        const kx = p0x + (naiveX - p0x) * f;
-        const ky = p0y + (naiveY - p0y) * f;
-        if (alpha < f) {
-          px = p0x + (kx - p0x) * (alpha / f);
-          py = p0y + (ky - p0y) * (alpha / f);
-        } else {
-          const t = (alpha - f) / (1 - f);
-          px = kx + (pEnd[0] - kx) * t;
-          py = ky + (pEnd[1] - ky) * t;
-        }
+        const t = (alpha - f) / (1 - f);
+        px = kx + (pEnd[0] - kx) * t;
+        py = ky + (pEnd[1] - ky) * t;
       }
-
-      ctx.beginPath();
-      ctx.arc(px, py, R_OUTER - STROKE / 2, 0, Math.PI * 2);
-      ctx.stroke();
     }
+
+    ctx.beginPath();
+    ctx.arc(px, py, R_OUTER - STROKE / 2, 0, Math.PI * 2);
+    ctx.stroke();
   }
 }
 
