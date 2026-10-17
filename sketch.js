@@ -124,7 +124,7 @@ function allocArrays() {
 }
 
 let tickNo = 0;
-let frameNo = 0;
+let tickAccumulatorMs = 0;
 let restartTick = 0; // tick of the last seed / cull; warm-up counts from here
 let paused = false;
 
@@ -154,7 +154,7 @@ function rebuildGrid() {
   allocArrays();
   recompute();
   tickNo = 0;
-  frameNo = 0;
+  tickAccumulatorMs = 0;
   seed(0);
 }
 
@@ -496,12 +496,40 @@ buildPanel();
 layoutResponsive();
 window.addEventListener("resize", layoutResponsive);
 
-function frame() {
+// Ticks are paced by wall-clock time, not by how many frames actually get
+// rendered — so the simulation runs at the same real-world speed whether
+// the browser manages 60fps or a much lower rate (e.g. on a slower mobile
+// device). CFG.tickEvery is "render frames per tick" at a nominal 60fps,
+// so one tick nominally takes (tickEvery / 60) seconds of real time;
+// that's the interval ticksMsPerTick() reproduces regardless of the
+// actual frame rate achieved.
+const NOMINAL_FPS = 60;
+const MAX_FRAME_DT_MS = 250; // clamp a stall (e.g. backgrounded tab) so it can't cause a huge catch-up burst
+const MAX_TICKS_PER_FRAME = 10; // cap how much a single frame can catch up by
+
+let lastFrameT = null;
+
+function msPerTick() {
+  return (CFG.tickEvery / NOMINAL_FPS) * 1000;
+}
+
+function frame(now) {
+  if (lastFrameT === null) lastFrameT = now;
+  const dt = Math.min(now - lastFrameT, MAX_FRAME_DT_MS);
+  lastFrameT = now;
+
   if (!paused) {
-    if (frameNo % CFG.tickEvery === 0) tick(tickNo++);
-    render((frameNo % CFG.tickEvery) / CFG.tickEvery);
-    frameNo++;
+    tickAccumulatorMs += dt;
+    const tickMs = msPerTick();
+    let ticksRun = 0;
+    while (tickAccumulatorMs >= tickMs && ticksRun < MAX_TICKS_PER_FRAME) {
+      tick(tickNo++);
+      tickAccumulatorMs -= tickMs;
+      ticksRun++;
+    }
+    render(Math.min(1, tickAccumulatorMs / tickMs));
   }
+
   requestAnimationFrame(frame);
 }
-frame();
+requestAnimationFrame(frame);
