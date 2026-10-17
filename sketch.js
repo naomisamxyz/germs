@@ -53,7 +53,7 @@ const CFG = {
   cullAt: 90, // population that triggers "all die except the latest"
   childSpeedup: 0.15, // extra speed per generation
   gmax: 3, // deepest generation
-  tickEvery: 4, // render frames per CA tick (higher = slower motion)
+  tickEvery: 2, // render frames per CA tick at nominal 60fps (higher = slower motion)
   ringRadius: 150, // ring outer radius, px
   cellSize: 6, // lattice resolution, px per cell (rebuilds the grid)
   lineInset: 70, // px from top/bottom edge to each boundary line
@@ -354,6 +354,12 @@ function render(alpha) {
   ctx.lineWidth = STROKE;
   ctx.strokeStyle = COLOR;
 
+  // One path for every germ, one stroke() call at the end — each stroke()
+  // is its own draw call, and per-draw-call overhead is proportionally much
+  // higher on mobile GPUs than desktop. With population able to reach
+  // CFG.cullAt (default 90), that was up to 90 separate draw calls a frame.
+  ctx.beginPath();
+
   // Smooth motion: a token's true grid speed pulses (whole hops per tick), so
   // instead of interpolating this tick's integer displacement directly, each
   // tick is drawn as a continuous pixel-space path from where it ended up
@@ -399,15 +405,24 @@ function render(alpha) {
       }
     }
 
-    ctx.beginPath();
+    ctx.moveTo(px + (R_OUTER - STROKE / 2), py);
     ctx.arc(px, py, R_OUTER - STROKE / 2, 0, Math.PI * 2);
-    ctx.stroke();
   }
+
+  ctx.stroke();
 }
 
 // ---- control panel ----
 
 const CONTROLS = [
+  {
+    // Slider reads 1 (slowest) - 9 (fastest), the intuitive direction for a
+    // "Speed" control — inverted from the underlying tickEvery (lower =
+    // faster: fewer render frames between ticks). toCfg/fromCfg handle the
+    // inversion; see buildPanel().
+    key: "tickEvery", label: "Speed", min: 1, max: 9, step: 1, unit: "",
+    toCfg: (raw) => 11 - raw, fromCfg: (v) => 11 - v,
+  },
   { key: "tSeconds", label: "Cooldown", min: 2, max: 60, step: 1, unit: "s" },
   {
     key: "warmupSeconds", label: "Warm-up", min: 0, max: 360, step: 5, unit: "s",
@@ -417,7 +432,6 @@ const CONTROLS = [
   { key: "cullAt", label: "Cull at", min: 10, max: 400, step: 5, unit: "" },
   { key: "childSpeedup", label: "Child speed-up", min: 0, max: 50, step: 1, unit: "%", pct: true },
   { key: "gmax", label: "Max generation", min: 1, max: 8, step: 1, unit: "" },
-  { key: "tickEvery", label: "Motion pace", min: 2, max: 10, step: 1, unit: "" },
   { key: "ringRadius", label: "Ring radius", min: 40, max: 260, step: 5, unit: "px" },
   { key: "cellSize", label: "Cell size", min: 4, max: 12, step: 1, unit: "px", rebuild: true },
   { key: "lineInset", label: "Line inset", min: 10, max: 300, step: 5, unit: "px" },
@@ -441,11 +455,11 @@ function buildPanel() {
     input.id = c.key;
     input.type = "range";
     input.min = c.min; input.max = c.max; input.step = c.step;
-    const toSlider = (v) => (c.pct ? Math.round(v * 100) : v);
+    const toSlider = (v) => (c.fromCfg ? c.fromCfg(v) : c.pct ? Math.round(v * 100) : v);
     input.value = toSlider(CFG[c.key]);
     const sync = () => {
       const raw = +input.value;
-      CFG[c.key] = c.pct ? raw / 100 : raw;
+      CFG[c.key] = c.toCfg ? c.toCfg(raw) : c.pct ? raw / 100 : raw;
       val.textContent = c.fmt ? c.fmt(raw) : raw + c.unit;
       if (c.rebuild) rebuildGrid();
       else recompute();
