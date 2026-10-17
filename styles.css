@@ -27,7 +27,7 @@ canvas {
   width: 25em;
   flex-shrink: 0;
   margin-top: 0.91em;
-  max-height: calc(90vh - 1.82em);
+  max-height: calc(95vh - 1.82em);
   max-height: calc(100dvh - 1.82em);
   overflow-y: auto; overflow-x: hidden;
   box-sizing: border-box;
