@@ -27,7 +27,7 @@ canvas {
   width: 25em;
   flex-shrink: 0;
   margin-top: 0.91em;
-  max-height: calc(100vh - 1.82em);
+  max-height: calc(90vh - 1.82em);
   max-height: calc(100dvh - 1.82em);
   overflow-y: auto; overflow-x: hidden;
   box-sizing: border-box;
@@ -35,7 +35,7 @@ canvas {
   border: 1px solid #333;
   border-radius: 0.73em;
   padding: 1.09em 1.09em 0.91em;
-  font: clamp(10px, 0.8vw, 12px)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: clamp(9px, 0.8vw, 12px)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #cfcfcf;
   z-index: 10;
   user-select: none;
