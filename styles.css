@@ -1,9 +1,20 @@
 html, body { margin: 0; height: 100%; background: #1a1a1a; }
 body {
   display: flex; align-items: flex-start; justify-content: center;
-  gap: 14px; height: 100vh; overflow: hidden; box-sizing: border-box;
+  gap: 14px; overflow: hidden; box-sizing: border-box;
+  /* 100vh on mobile Safari counts the area hidden under its collapsing
+     address-bar toolbar, so it overshoots the actually-visible viewport —
+     Chrome doesn't have this quirk, hence the Safari-only cutoff. 100dvh
+     (dynamic viewport height) tracks the real visible area instead; the
+     100vh line above it is a fallback for browsers that don't support dvh. */
+  height: 100vh;
+  height: 100dvh;
 }
-canvas { height: 100vh; width: auto; display: block; flex-shrink: 0; }
+canvas {
+  width: auto; display: block; flex-shrink: 0;
+  height: 100vh;
+  height: 100dvh;
+}
 
 /* Normally the panel is a plain flex sibling of the canvas (side by side,
    never overlapping it). layoutResponsive() in sketch.js adds .narrow to
@@ -16,6 +27,8 @@ canvas { height: 100vh; width: auto; display: block; flex-shrink: 0; }
   width: 25em;
   flex-shrink: 0;
   margin-top: 0.91em;
+  max-height: calc(100vh - 1.82em);
+  max-height: calc(100dvh - 1.82em);
   overflow-y: auto; overflow-x: hidden;
   box-sizing: border-box;
   background: #0d0d0d;
@@ -49,6 +62,8 @@ canvas { height: 100vh; width: auto; display: block; flex-shrink: 0; }
    viewport and the (collapsed, by default) panel sits on top of it. */
 body.narrow #panel {
   position: fixed; left: 10px; top: 10px; margin-top: 0; z-index: 30;
+  max-height: calc(100vh - 20px);
+  max-height: calc(100dvh - 20px);
 }
 
 #readme-overlay {
