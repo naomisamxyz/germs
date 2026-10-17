@@ -35,7 +35,7 @@ canvas {
   border: 1px solid #333;
   border-radius: 0.73em;
   padding: 1.09em 1.09em 0.91em;
-  font: clamp(10px, 0.9vw, 12px)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: clamp(10px, 0.8vw, 12px)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #cfcfcf;
   z-index: 10;
   user-select: none;
