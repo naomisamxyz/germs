@@ -44,6 +44,8 @@ for (let d = 0; d < ND; d++) VKEY[(VX[d] + 2) * 5 + (VY[d] + 2)] = d;
 const SPEED_SCALE = 1000; // fixed-point unit: 1000 = one velocity vector
 const COLOR = "#29A2DC"; // ring stroke colour
 const LINE_COLOR = "#fff";
+const CANVAS_DEFAULT_H = 1920; // keep in sync with <canvas height> in index.html
+const CANVAS_ALT_H = 1668; // height the "Canvas height" button toggles to
 
 // Live-tunable values (wired to the on-screen panel).
 const CFG = {
@@ -77,15 +79,22 @@ let WALL_LEFT, WALL_RIGHT, WALL_TOP, WALL_BOTTOM;
 function recompute() {
   R_OUTER = CFG.ringRadius;
   STROKE = R_OUTER * 0.26;
-  // Exact pixel wall positions the ring's edge bounces off. Top/bottom stay
-  // at the canvas edges; left/right are the boundary lines instead.
-  WALL_LEFT = CFG.lineInset + R_OUTER;
-  WALL_RIGHT = canvas.width - CFG.lineInset - R_OUTER;
-  WALL_TOP = R_OUTER;
-  WALL_BOTTOM = canvas.height - R_OUTER;
-  // Same boundaries, in grid cells, for the simulation's own bounds check.
-  MARGIN_X = Math.min(Math.floor(GW / 2) - 2, Math.round(WALL_LEFT / CS));
-  MARGIN_Y = Math.min(Math.floor(GH / 2) - 2, Math.round(WALL_TOP / CS));
+  // Where the ring's centre should stop: top/bottom at the canvas edges,
+  // left/right at the boundary lines (each inset by the ring radius).
+  const wantLeft = CFG.lineInset + R_OUTER;
+  const wantTop = R_OUTER;
+  // ...snapped to whole grid cells for the simulation's own bounds check.
+  MARGIN_X = Math.min(Math.floor(GW / 2) - 2, Math.round(wantLeft / CS));
+  MARGIN_Y = Math.min(Math.floor(GH / 2) - 2, Math.round(wantTop / CS));
+  // The pixel walls render() uses to place the visible bounce corner. These
+  // MUST be the same planes the simulation actually reflects about (cell
+  // MARGIN_X's centre etc.), not the un-snapped targets above: if they
+  // differ, the drawn path after a bounce is a different length than the
+  // simulated hop, and the ring visibly jumps ahead on that frame.
+  WALL_LEFT = (MARGIN_X + 0.5) * CS;
+  WALL_RIGHT = (GW - 1 - MARGIN_X + 0.5) * CS;
+  WALL_TOP = (MARGIN_Y + 0.5) * CS;
+  WALL_BOTTOM = (GH - 1 - MARGIN_Y + 0.5) * CS;
   T_TICKS = Math.max(1, Math.round((CFG.tSeconds * 60) / CFG.tickEvery));
   WARMUP_TICKS = Math.round((CFG.warmupSeconds * 60) / CFG.tickEvery);
 }
@@ -327,17 +336,15 @@ function anchorPx(cx, cy, accVal, d) {
   return [(cx + 0.5 + VX[d] * f) * CS, (cy + 0.5 + VY[d] * f) * CS];
 }
 
-// Fraction (0-1) along the straight run from (p0x,p0y) with displacement
-// (dx,dy) at which it first crosses a wall — i.e. where the true bounce
-// point sits.
-function kinkFraction(p0x, p0y, dx, dy) {
-  let f = 1;
-  if (dx > 0) f = Math.min(f, (WALL_RIGHT - p0x) / dx);
-  else if (dx < 0) f = Math.min(f, (WALL_LEFT - p0x) / dx);
-  if (dy > 0) f = Math.min(f, (WALL_BOTTOM - p0y) / dy);
-  else if (dy < 0) f = Math.min(f, (WALL_TOP - p0y) / dy);
-  if (!isFinite(f)) f = 0.5;
-  return Math.min(0.98, Math.max(0.02, f));
+// Reflects v back into [lo, hi] as if bouncing off walls at lo and hi
+// (repeatedly, if it is that far out): the unfolded straight-line path of a
+// bouncing object, mapped to where it actually is.
+function fold(v, lo, hi) {
+  const span = hi - lo;
+  if (span <= 0) return lo;
+  let u = (v - lo) % (2 * span);
+  if (u < 0) u += 2 * span;
+  return lo + (u <= span ? u : 2 * span - u);
 }
 
 function render(alpha) {
@@ -365,12 +372,15 @@ function render(alpha) {
   // tick is drawn as a continuous pixel-space path from where it ended up
   // last tick to where it lands this tick.
   //
-  // A tick with no bounce is a single straight leg at the token's current
-  // heading (algebraically the same line the old single-formula version
-  // drew). A tick where the token bounced is drawn as two legs meeting
-  // exactly at the wall — leg 1 at the pre-bounce heading, leg 2 at the
-  // post-bounce heading — so frame-to-frame position never snaps, but the
-  // corner at the wall stays sharp instead of getting rounded off.
+  // That path is drawn as if there were no walls — a straight line at the
+  // heading the token had when the tick began — and then every position is
+  // folded back inside the walls (a mirror reflection per axis, see fold()).
+  // That is exactly what the simulation's own bounce does to the hop, so the
+  // two agree to the pixel: the corner at the wall is sharp, the ring never
+  // pokes past the wall, and nothing snaps between frames. (A token carrying
+  // a leftover movement budget can sit a little past the wall at the end of
+  // the tick before it bounces; the fold turns that into a clean reflection
+  // instead of an overshoot-and-snap-back.)
   for (let k = 0; k < activeList.length; k++) {
     const si = activeList[k];
     const d = si % ND;
@@ -379,31 +389,27 @@ function render(alpha) {
     const cy = (cellIdx / GW) | 0;
 
     const nomV = speedFor(gen[si]) / SPEED_SCALE; // vectors advanced per tick
-    const pEnd = anchorPx(cx, cy, acc[si], d);
-    let px, py;
+    let p0x, p0y, p1x, p1y; // unfolded start / end of this tick's straight path
 
     if (!bounced[si]) {
-      const p0x = pEnd[0] - nomV * CS * VX[d];
-      const p0y = pEnd[1] - nomV * CS * VY[d];
-      px = p0x + (pEnd[0] - p0x) * alpha;
-      py = p0y + (pEnd[1] - p0y) * alpha;
+      const pEnd = anchorPx(cx, cy, acc[si], d);
+      p1x = pEnd[0];
+      p1y = pEnd[1];
+      p0x = p1x - nomV * CS * VX[d];
+      p0y = p1y - nomV * CS * VY[d];
     } else {
+      // Bounced this tick: start from where the token ended last tick, and
+      // keep going straight at its pre-bounce heading.
       const sd = srcDIR[si];
-      const [p0x, p0y] = anchorPx(srcCX[si], srcCY[si], srcACC[si], sd);
-      const naiveX = p0x + nomV * CS * VX[sd];
-      const naiveY = p0y + nomV * CS * VY[sd];
-      const f = kinkFraction(p0x, p0y, naiveX - p0x, naiveY - p0y);
-      const kx = p0x + (naiveX - p0x) * f;
-      const ky = p0y + (naiveY - p0y) * f;
-      if (alpha < f) {
-        px = p0x + (kx - p0x) * (alpha / f);
-        py = p0y + (ky - p0y) * (alpha / f);
-      } else {
-        const t = (alpha - f) / (1 - f);
-        px = kx + (pEnd[0] - kx) * t;
-        py = ky + (pEnd[1] - ky) * t;
-      }
+      const p0 = anchorPx(srcCX[si], srcCY[si], srcACC[si], sd);
+      p0x = p0[0];
+      p0y = p0[1];
+      p1x = p0x + nomV * CS * VX[sd];
+      p1y = p0y + nomV * CS * VY[sd];
     }
+
+    const px = fold(p0x + (p1x - p0x) * alpha, WALL_LEFT, WALL_RIGHT);
+    const py = fold(p0y + (p1y - p0y) * alpha, WALL_TOP, WALL_BOTTOM);
 
     ctx.moveTo(px + (R_OUTER - STROKE / 2), py);
     ctx.arc(px, py, R_OUTER - STROKE / 2, 0, Math.PI * 2);
@@ -416,12 +422,13 @@ function render(alpha) {
 
 const CONTROLS = [
   {
-    // Slider reads 1 (slowest) - 9 (fastest), the intuitive direction for a
+    // Slider reads 2 (slowest) - 20 (fastest), the intuitive direction for a
     // "Speed" control — inverted from the underlying tickEvery (lower =
-    // faster: fewer render frames between ticks). toCfg/fromCfg handle the
-    // inversion; see buildPanel().
-    key: "tickEvery", label: "Speed", min: 1, max: 9, step: 1, unit: "",
-    toCfg: (raw) => 11 - raw, fromCfg: (v) => 11 - v,
+    // faster: fewer render frames between ticks). Each slider step is half a
+    // frame: 2 -> tickEvery 10 (slowest), 18 -> 2, 20 -> 1 (fastest, one tick
+    // per nominal frame). toCfg/fromCfg handle the inversion; see buildPanel().
+    key: "tickEvery", label: "Speed", min: 2, max: 20, step: 1, unit: "",
+    toCfg: (raw) => (22 - raw) / 2, fromCfg: (v) => 22 - 2 * v,
   },
   { key: "tSeconds", label: "Cooldown", min: 2, max: 60, step: 1, unit: "s" },
   {
@@ -478,6 +485,18 @@ function buildPanel() {
 
   on("reset", () => { for (const r of rows) r.set(DEFAULTS[r.c.key]); });
   on("restart", () => hardRestart());
+  // Toggles the canvas's internal height between its default and CANVAS_ALT_H.
+  // The grid, walls and aspect ratio all derive from canvas.height, so this
+  // rebuilds the grid (restarting from one germ, like a cell-size change).
+  on("canvas-size", () => {
+    canvas.height = canvas.height === CANVAS_DEFAULT_H ? CANVAS_ALT_H : CANVAS_DEFAULT_H;
+    // Label names the height a click will switch TO, not the current one.
+    const next = canvas.height === CANVAS_DEFAULT_H ? CANVAS_ALT_H : CANVAS_DEFAULT_H;
+    document.getElementById("canvas-size").textContent = "Switch canvas height to: " + next;
+    rebuildGrid();
+    layoutResponsive();
+    render(0);
+  });
   on("pause", () => {
     paused = !paused;
     document.getElementById("pause").textContent = paused ? "Resume" : "Pause";
@@ -555,9 +574,37 @@ function msPerTick() {
   return (CFG.tickEvery / NOMINAL_FPS) * 1000;
 }
 
+// Browsers report each rAF timestamp with a little jitter (a frame "at"
+// 16.1ms, the next at 17.4ms) even though the display refreshes on a fixed
+// beat. Position is driven directly by dt, so that jitter shows up on screen
+// as shimmer — invisible at low speed, obvious once things move fast. So dt
+// is snapped to a whole multiple of the display's refresh interval (the
+// median of recent frame gaps). A genuinely dropped frame still reads as 2x,
+// so no real time is lost and nothing drifts.
+const DT_HISTORY = 30;
+const dtHistory = [];
+let refreshEstimate = null;
+
+function steadyDt(rawDt) {
+  dtHistory.push(rawDt);
+  if (dtHistory.length > DT_HISTORY) dtHistory.shift();
+  if (dtHistory.length < 10) return rawDt; // not enough samples to know the refresh rate yet
+  const sorted = dtHistory.slice().sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1];
+  if (median < 4 || median > 100) return rawDt; // implausible refresh rate; don't trust it
+  // Ease toward the median rather than adopting it outright, so the estimate
+  // itself doesn't twitch frame to frame; snap straight to it on a big change
+  // (e.g. the display switching refresh rate).
+  if (refreshEstimate === null || Math.abs(median - refreshEstimate) > refreshEstimate * 0.25) refreshEstimate = median;
+  else refreshEstimate += (median - refreshEstimate) * 0.05;
+  const interval = refreshEstimate;
+  if (rawDt < interval * 0.5) return rawDt; // an off-beat extra callback, not a normal frame: keep its real time
+  return Math.round(rawDt / interval) * interval;
+}
+
 function frame(now) {
   if (lastFrameT === null) lastFrameT = now;
-  const dt = Math.min(now - lastFrameT, MAX_FRAME_DT_MS);
+  const dt = steadyDt(Math.min(now - lastFrameT, MAX_FRAME_DT_MS));
   lastFrameT = now;
 
   if (!paused) {
